@@ -31,3 +31,5 @@ python main.py
 * **Weapon Selection:** Use numerical keys 1 through 6 to alternate baseline presets.
 * **Execution:** Press ENTER to process function calculations and fire curves.
 * **Manual Entry:** Use standard keyboard inputs within Hard Mode configurations to pass direct custom string operations.
+##license
+*Math Fight is licensed under PolyForm Noncommercial. For commercial licensing inquiries (e.g., school districts, commercial arcades, or bundling), please contact me at ostapcraft16@gmail.com.
