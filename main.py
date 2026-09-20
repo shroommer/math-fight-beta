@@ -147,8 +147,6 @@ class MathFight:
 		self.level_name = "untitled_arena"
 		self.level_description = ""
 		self.level_points: list[tuple[float, float]] = []
-		self.current_level_targets: list[tuple[float, float]] = []
-		self.current_level_name = ""
 		self.level_input_active = False
 		self.level_status = "Click the arena to place targets."
 		self.mustache_orb = self.load_mustache_orb()
@@ -435,32 +433,10 @@ class MathFight:
 		self.text("Click a target again to remove it.", 54, 296, MUTED, self.small)
 		self.text(f"TARGETS {len(self.level_points):02d}", 54, 344, GOLD, self.font)
 		self.text(self.level_status, 54, 382, CYAN, self.small)
-		for rect, label in [(pygame.Rect(54, 450, 230, 46), "SAVE .MFL"), (pygame.Rect(54, 510, 230, 46), "LOAD LATEST"), (pygame.Rect(54, 570, 230, 46), "PLAY LEVEL")]:
-			active = label in {"SAVE .MFL", "PLAY LEVEL"}
-			pygame.draw.rect(self.screen, GOLD if active else PANEL_LIGHT, rect, border_radius=8)
-			self.text(label, rect.x + 62, rect.y + 14, BG if active else TEXT, self.small)
+		for rect, label in [(pygame.Rect(54, 450, 230, 46), "SAVE .MFL"), (pygame.Rect(54, 510, 230, 46), "LOAD LATEST")]:
+			pygame.draw.rect(self.screen, GOLD if label.startswith("SAVE") else PANEL_LIGHT, rect, border_radius=8)
+			self.text(label, rect.x + 62, rect.y + 14, BG if label.startswith("SAVE") else TEXT, self.small)
 		self.text("ESC  BACK TO MENU", 54, 680, MUTED, self.small)
-
-	def start_level(self) -> None:
-		if not self.level_points:
-			self.load_level()
-		if not self.level_points:
-			return
-		self.current_level_targets = list(self.level_points)
-		self.current_level_name = self.level_name
-		self.start("mfl")
-
-	def draw_level_targets(self) -> None:
-		if self.mode != "mfl" or not self.current_level_targets:
-			return
-		for target_x, target_y in self.current_level_targets:
-			pixel = (
-				GRAPH.left + int(target_x * GRAPH.width),
-				GRAPH.top + int(target_y * GRAPH.height),
-			)
-			pygame.draw.circle(self.screen, GOLD, pixel, 11, 2)
-			pygame.draw.line(self.screen, GOLD, (pixel[0] - 16, pixel[1]), (pixel[0] + 16, pixel[1]), 1)
-			pygame.draw.line(self.screen, GOLD, (pixel[0], pixel[1] - 16), (pixel[0], pixel[1] + 16), 1)
 
 	def admin_panel(self) -> None:
 		self.draw_background()
@@ -1052,9 +1028,6 @@ class MathFight:
 	def start(self, mode: str) -> None:
 		self.mode = mode
 		self.last_mode = mode
-		if mode != "mfl":
-			self.current_level_targets = []
-			self.current_level_name = ""
 		self.reward_paid = False
 		self.selected = 0
 		self.input_text = "x^2 - 3"
@@ -1130,7 +1103,7 @@ class MathFight:
 		pygame.draw.rect(self.screen, PANEL_LIGHT, menu_button, border_radius=3)
 		self.text("MAIN MENU", menu_button.x + 20, 31, TEXT, self.small)
 		pygame.draw.rect(self.screen, PANEL, (0, 92, 285, self.screen.get_height() - 92))
-		heading = "PRESET ARSENAL // PREVIEW" if self.mode == "preset" else (f"MFL LEVEL // {self.current_level_name}" if self.mode == "mfl" else "HARD MODE // PREVIEW ON")
+		heading = "PRESET ARSENAL // PREVIEW" if self.mode == "preset" else "HARD MODE // PREVIEW ON"
 		self.text(heading, 22, 122, GOLD, self.small)
 		if self.mode == "preset":
 			presets = self.available_presets
@@ -1164,7 +1137,6 @@ class MathFight:
 		self.text("GRAPH RULES", 20, self.screen.get_height() - 62, GOLD, self.small)
 		self.text("Crossing an enemy = 25 damage", 20, self.screen.get_height() - 40, MUTED, self.small)
 		self.draw_graph()
-		self.draw_level_targets()
 
 	def sample(self, function) -> list[tuple[float, float]]:
 		x_values = np.linspace(X_MIN, X_MAX, 161, dtype=np.float64)
@@ -1367,9 +1339,6 @@ class MathFight:
 				self.save_level()
 			elif pygame.Rect(54, 510, 230, 46).collidepoint(x, y):
 				self.load_level()
-			elif pygame.Rect(54, 570, 230, 46).collidepoint(x, y):
-				self.start_level()
-				return
 		elif self.mode == "admin_panel":
 			if self.owner_access():
 				for index, user in enumerate(self.users[:8]):
