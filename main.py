@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import math
 import json
+import os
 import random
 import re
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 import pygame
@@ -29,6 +33,7 @@ CYAN = (103, 232, 249)
 ORB_GREEN = (0, 255, 0)
 GOLD = (251, 191, 36)
 RED = (251, 113, 133)
+TAGS = ("PLAYER", "SUPPORTER", "DEVELOPER", "ADMIN", "OWNER")
 CPU_DAMAGE = 10
 CPU_MOVE_STEP = 0.12
 CPU_FIRE_INTERVAL = 2
@@ -47,6 +52,20 @@ SHOP_PRESETS = [
 	("TWIN WAVE", "2 sin(1.6x)", lambda x: 2 * np.sin(1.6 * x), 260, 0),
 	("FLARE ARC", "-0.6x^2 + 7", lambda x: -0.6 * x * x + 7, 420, 0),
 	("CUSTOM PRESET", "x^2 - 2", lambda x: x * x - 2, 1000, 50),
+]
+
+RANKS = [
+	"0 YEAR OLD",
+	"NERD",
+	"PRO",
+	"ALFRED EINSTEIN",
+	"ALBERT",
+	"EINSTEIN",
+	"ALBERT EINSTEIN",
+	"ALBERT EINSTEIN 2X",
+	"ALBERT EINSTEIN 3X",
+	"ALBERT EINSTEIN 4X",
+	"ALBERT EINSTEIN 5X",
 ]
 
 @dataclass
@@ -71,9 +90,66 @@ class MathFight:
 		self.result = ""
 		self.reward_paid = False
 		self.save_path = Path(__file__).with_name("math_fight_save.json")
-		self.coins, self.diamonds, self.mustache, self.unlocked_preset_names, self.custom_preset_unlocked, self.custom_preset_equation = self.load_save()
+		(
+			self.coins,
+			self.diamonds,
+			self.mustache,
+			self.unlocked_preset_names,
+			self.custom_preset_unlocked,
+			self.custom_preset_equation,
+			self.total_wins,
+			self.username,
+			self.users,
+			self.settings,
+			self.achievements,
+			self.best_combo,
+			self.total_battles,
+			self.best_streak,
+			self.daily_challenge_index,
+			self.daily_challenge_progress,
+			self.daily_challenge_date,
+		) = self.load_save()
+		self.settings = self.settings or {
+			"sound": True,
+			"reduced_motion": False,
+			"show_tips": True,
+		}
+		self.achievements = self.achievements or {
+			"first_win": False,
+			"showdown": False,
+			"coin_collector": False,
+			"graph_guru": False,
+			"ranked_up": False,
+			"legend": False,
+		}
 		self.shop_status = "Customize your orb."
+		self.search_query = ""
+		self.search_input_active = False
+		self.name_edit_text = self.username
+		self.name_edit_active = False
+		self.saved_username = self.username
+		self.owner_username = self.load_owner_username()
+		self.user_tag = self.user_tag_for(self.username)
+		self.tag_target_name = ""
+		self.admin_selected_name = ""
+		self.online_server_url = os.environ.get("MATH_FIGHT_SERVER_URL", "http://127.0.0.1:8765").rstrip("/")
+		self.online_users: list[dict] = []
+		self.online_status = "Online profiles are not connected."
+		self.level_name = "untitled_arena"
+		self.level_description = ""
+		self.level_points: list[tuple[float, float]] = []
+		self.level_input_active = False
+		self.level_status = "Click the arena to place targets."
 		self.mustache_orb = self.load_mustache_orb()
+		self.settings.setdefault("sound", True)
+		self.settings.setdefault("reduced_motion", False)
+		self.settings.setdefault("show_tips", True)
+		self.achievements.setdefault("first_win", False)
+		self.achievements.setdefault("showdown", False)
+		self.achievements.setdefault("coin_collector", False)
+		self.achievements.setdefault("graph_guru", False)
+		self.achievements.setdefault("ranked_up", False)
+		self.achievements.setdefault("legend", False)
 		self.selected = 0
 		self.input_text = "x^2 - 3"
 		self.input_active = False
@@ -135,22 +211,110 @@ class MathFight:
 		surface = (font or self.font).render(value, True, color)
 		self.screen.blit(surface, (x, y))
 
+	def load_owner_username(self) -> str:
+		try:
+			data = json.loads(self.save_path.read_text(encoding="utf-8"))
+			return str(data.get("owner_username") or self.username)
+		except (OSError, ValueError, TypeError, json.JSONDecodeError):
+			return self.username
+
+	def user_tag_for(self, username: str) -> str:
+		if username == self.owner_username:
+			return "OWNER"
+		for user in self.users:
+			if isinstance(user, dict) and str(user.get("name", "")) == username:
+				tag = str(user.get("tag", "PLAYER")).upper()
+				return tag if tag in TAGS else "PLAYER"
+		return "PLAYER"
+
+	def owner_access(self) -> bool:
+		if self.username == self.owner_username:
+			return True
+		return any(
+			isinstance(user, dict)
+			and str(user.get("name", "")) == self.username
+			and str(user.get("tag", "")).upper() == "OWNER"
+			for user in self.users
+		)
+
+	def online_request(self, method: str, path: str, payload: dict | None = None) -> object:
+		body = None
+		headers = {"Accept": "application/json"}
+		if payload is not None:
+			body = json.dumps(payload).encode("utf-8")
+			headers["Content-Type"] = "application/json"
+		request = urllib.request.Request(f"{self.online_server_url}{path}", data=body, headers=headers, method=method)
+		with urllib.request.urlopen(request, timeout=2.5) as response:
+			return json.loads(response.read().decode("utf-8"))
+
+	def sync_online_profile(self) -> None:
+		try:
+			self.online_request("POST", "/profiles", {
+				"name": self.username,
+				"tag": self.user_tag,
+				"coins": self.coins,
+				"diamonds": self.diamonds,
+				"wins": self.total_wins,
+			})
+			self.online_status = f"ONLINE // {self.online_server_url}"
+		except (OSError, ValueError, TypeError, json.JSONDecodeError, urllib.error.URLError):
+			self.online_status = "OFFLINE // start math_fight_server.py on the host PC"
+
+	def refresh_online_users(self) -> None:
+		try:
+			query = urllib.parse.quote(self.search_query)
+			result = self.online_request("GET", f"/profiles?q={query}")
+			self.online_users = result if isinstance(result, list) else []
+			self.online_status = f"ONLINE // {len(self.online_users)} shared profiles"
+		except (OSError, ValueError, TypeError, json.JSONDecodeError, urllib.error.URLError):
+			self.online_users = []
+			self.online_status = "OFFLINE // start math_fight_server.py on the host PC"
+
+	def assign_tag(self, username: str, tag: str) -> None:
+		if not self.owner_access() or username == self.owner_username or tag not in TAGS[:-1]:
+			return
+		for user in self.users:
+			if isinstance(user, dict) and str(user.get("name", "")) == username:
+				user["tag"] = tag
+				self.tag_target_name = username
+				self.save()
+				return
+
+	def draw_background(self) -> None:
+		self.screen.fill(BG)
+		width, height = self.screen.get_size()
+		for x in range(0, width, 40):
+			pygame.draw.line(self.screen, (14, 27, 47), (x, 0), (x, height), 1)
+		for y in range(0, height, 40):
+			pygame.draw.line(self.screen, (14, 27, 47), (0, y), (width, y), 1)
+		pygame.draw.line(self.screen, (36, 69, 88), (0, height - 82), (width, height - 82), 1)
+
+	def panel(self, rect: pygame.Rect, fill=(17, 27, 48, 238), border=(74, 101, 129, 115), radius=12) -> None:
+		shadow = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+		pygame.draw.rect(shadow, (0, 0, 0, 105), shadow.get_rect(), border_radius=radius)
+		self.screen.blit(shadow, (rect.x + 5, rect.y + 7))
+		card = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+		pygame.draw.rect(card, fill, card.get_rect(), border_radius=radius)
+		pygame.draw.rect(card, border, card.get_rect(), 1, border_radius=radius)
+		self.screen.blit(card, rect.topleft)
+
 	def button(self, rect: pygame.Rect, label: str, detail: str, color=CYAN) -> None:
 		mouse = pygame.mouse.get_pos()
 		hover = rect.collidepoint(mouse)
 		shadow = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
-		pygame.draw.rect(shadow, (0, 0, 0, 110), shadow.get_rect(), border_radius=18)
-		self.screen.blit(shadow, (rect.x + 10, rect.y + 12))
+		pygame.draw.rect(shadow, (0, 0, 0, 100), shadow.get_rect(), border_radius=10)
+		self.screen.blit(shadow, (rect.x + 5, rect.y + 7))
 		card = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
-		pygame.draw.rect(card, (19, 31, 52, 235), card.get_rect(), border_radius=18)
-		pygame.draw.rect(card, (*color, 160) if hover else (*color, 120), (16, 16, rect.w - 32, 52), border_radius=12)
-		pygame.draw.rect(card, (255, 255, 255, 24), (14, 14, rect.w - 28, rect.h - 28), 1, border_radius=18)
+		pygame.draw.rect(card, (17, 29, 49, 245), card.get_rect(), border_radius=10)
+		pygame.draw.rect(card, (*color, 185) if hover else (34, 54, 76, 220), (1, 1, rect.w - 2, 58), border_radius=9)
+		pygame.draw.line(card, (*color, 180), (18, 60), (rect.w - 18, 60), 1)
 		self.screen.blit(card, rect.topleft)
-		label_surface = self.font.render(label, True, BG if hover else (9, 16, 30))
-		self.screen.blit(label_surface, label_surface.get_rect(center=(rect.centerx, rect.y + 42)))
-		self.text(detail, rect.x + 24, rect.y + 82, (201, 216, 255), self.small)
+		label_surface = self.font.render(label, True, BG if hover else TEXT)
+		self.screen.blit(label_surface, label_surface.get_rect(midleft=(rect.x + 18, rect.y + 30)))
+		if rect.h >= 80:
+			self.text(detail, rect.x + 18, rect.y + 78, (173, 193, 216), self.small)
 		if hover:
-			pygame.draw.line(self.screen, color, (rect.x + 24, rect.bottom - 12), (rect.right - 24, rect.bottom - 12), 2)
+			pygame.draw.line(self.screen, color, (rect.x + 18, rect.bottom - 10), (rect.right - 18, rect.bottom - 10), 2)
 
 	@property
 	def available_presets(self) -> list[tuple[str, str, object]]:
@@ -164,36 +328,148 @@ class MathFight:
 				presets.append((name, equation, function))
 		return presets
 
+	def preset_buttons(self) -> list[tuple[int, pygame.Rect]]:
+		buttons: list[tuple[int, pygame.Rect]] = []
+		for index in range(len(self.available_presets)):
+			column = index % 2
+			row = index // 2
+			buttons.append((index, pygame.Rect(16 + column * 128, 160 + row * 54, 118, 42)))
+		return buttons
+
+	def preset_preview_y(self) -> int:
+		buttons = self.preset_buttons()
+		if not buttons:
+			return 330
+		last_rect = buttons[-1][1]
+		return max(330, last_rect.bottom + 16)
+
+	def level_file_path(self) -> Path:
+		clean_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", self.level_name.strip()).strip("_") or "untitled_arena"
+		return Path(__file__).with_name(f"{clean_name}.mfl")
+
+	def save_level(self) -> None:
+		payload = {
+			"format": "math-fight-level",
+			"version": 1,
+			"name": self.level_name.strip() or "untitled_arena",
+			"description": self.level_description.strip(),
+			"author": self.username,
+			"author_tag": self.user_tag,
+			"targets": [{"x": round(x, 4), "y": round(y, 4)} for x, y in self.level_points],
+		}
+		try:
+			self.level_file_path().write_text(json.dumps(payload, indent=2), encoding="utf-8")
+			self.level_status = f"Saved {self.level_file_path().name}"
+		except OSError:
+			self.level_status = "Could not save this level."
+
+	def load_level(self) -> None:
+		paths = sorted(Path(__file__).parent.glob("*.mfl"), key=lambda path: path.stat().st_mtime, reverse=True)
+		if not paths:
+			self.level_status = "No .mfl levels found yet."
+			return
+		try:
+			data = json.loads(paths[0].read_text(encoding="utf-8"))
+			self.level_name = str(data.get("name", paths[0].stem))
+			self.level_description = str(data.get("description", ""))
+			self.level_points = [
+				(float(target["x"]), float(target["y"]))
+				for target in data.get("targets", [])
+				if isinstance(target, dict) and "x" in target and "y" in target
+			]
+			self.level_status = f"Loaded {paths[0].name}"
+		except (OSError, ValueError, TypeError, json.JSONDecodeError, KeyError):
+			self.level_status = "That .mfl file is invalid."
+
+	def level_editor(self) -> None:
+		self.draw_background()
+		self.text("LEVEL EDITOR", 54, 48, CYAN, self.title)
+		self.text("BUILD A GRAPH ARENA / SAVE IT AS .MFL", 58, 112, GOLD, self.font)
+		canvas = pygame.Rect(330, 140, 880, 500)
+		self.panel(canvas, fill=(10, 20, 36, 245), border=(61, 113, 135, 150), radius=10)
+		for x in range(canvas.left + 40, canvas.right, 40):
+			pygame.draw.line(self.screen, (24, 49, 68), (x, canvas.top), (x, canvas.bottom), 1)
+		for y in range(canvas.top + 40, canvas.bottom, 40):
+			pygame.draw.line(self.screen, (24, 49, 68), (canvas.left, y), (canvas.right, y), 1)
+		for point_x, point_y in self.level_points:
+			pixel = (canvas.left + int(point_x * canvas.width), canvas.top + int(point_y * canvas.height))
+			pygame.draw.circle(self.screen, GOLD, pixel, 8)
+			pygame.draw.circle(self.screen, GOLD, pixel, 15, 1)
+		self.text("LEVEL NAME", 54, 170, MUTED, self.small)
+		name_box = pygame.Rect(54, 194, 230, 42)
+		pygame.draw.rect(self.screen, (19, 35, 56), name_box, border_radius=7)
+		pygame.draw.rect(self.screen, CYAN if self.level_input_active else MUTED, name_box, 2, border_radius=7)
+		self.text(self.level_name, name_box.x + 12, name_box.y + 11, TEXT, self.small)
+		self.text("Click inside the arena to add targets.", 54, 270, TEXT, self.small)
+		self.text("Click a target again to remove it.", 54, 296, MUTED, self.small)
+		self.text(f"TARGETS {len(self.level_points):02d}", 54, 344, GOLD, self.font)
+		self.text(self.level_status, 54, 382, CYAN, self.small)
+		for rect, label in [(pygame.Rect(54, 450, 230, 46), "SAVE .MFL"), (pygame.Rect(54, 510, 230, 46), "LOAD LATEST")]:
+			pygame.draw.rect(self.screen, GOLD if label.startswith("SAVE") else PANEL_LIGHT, rect, border_radius=8)
+			self.text(label, rect.x + 62, rect.y + 14, BG if label.startswith("SAVE") else TEXT, self.small)
+		self.text("ESC  BACK TO MENU", 54, 680, MUTED, self.small)
+
+	def admin_panel(self) -> None:
+		self.draw_background()
+		self.text("ADMIN PANEL", 54, 48, CYAN, self.title)
+		self.text("OWNER CONTROLS / LOCAL PROFILE DATA", 58, 112, GOLD, self.font)
+		if not self.owner_access():
+			self.panel(pygame.Rect(270, 220, 740, 180), fill=(45, 22, 36, 245), border=(251, 113, 133, 150), radius=10)
+			self.text("ACCESS DENIED", 500, 270, RED, self.title)
+			self.text("Only the owner account can open this panel.", 430, 330, TEXT, self.small)
+			return
+		users_panel = pygame.Rect(54, 150, 700, 500)
+		self.panel(users_panel, fill=(10, 20, 36, 245), border=(61, 113, 135, 150), radius=10)
+		self.text("USER TAGS", users_panel.x + 24, users_panel.y + 22, GOLD, self.font)
+		for index, user in enumerate(self.users[:8]):
+			row = pygame.Rect(users_panel.x + 24, users_panel.y + 70 + index * 48, 650, 38)
+			name = str(user.get("name", "PLAYER"))
+			selected = name == self.admin_selected_name
+			pygame.draw.rect(self.screen, (30, 74, 91) if selected else (18, 30, 52), row, border_radius=7)
+			user_tag = "OWNER" if name == self.owner_username else str(user.get("tag", "PLAYER")).upper()
+			self.text(name, row.x + 12, row.y + 10, CYAN if selected else TEXT, self.small)
+			self.text(user_tag, row.x + 430, row.y + 10, GOLD, self.small)
+		self.text("CLICK TO SELECT", 790, 185, MUTED, self.small)
+		self.text(f"SELECTED: {self.admin_selected_name or 'NONE'}", 790, 230, TEXT, self.small)
+		for index, tag in enumerate(TAGS[:-1]):
+			rect = pygame.Rect(790, 270 + index * 54, 270, 42)
+			pygame.draw.rect(self.screen, GOLD if index == 0 else PANEL_LIGHT, rect, border_radius=8)
+			self.text(f"{index + 1}  {tag}", rect.x + 26, rect.y + 13, BG if index == 0 else TEXT, self.small)
+		self.text(f"MFL LEVELS: {len(list(Path(__file__).parent.glob('*.mfl')))}", 790, 535, CYAN, self.font)
+		self.text("Select a user, then click a tag.", 790, 575, MUTED, self.small)
+		self.text("ESC  BACK TO MENU", 54, 680, MUTED, self.small)
+
 	def menu(self) -> None:
-		self.screen.fill(BG)
-		# ambient glows
-		for center, radius, color in [((260, 120), 180, (94, 232, 249)), ((980, 180), 220, (168, 130, 255)), ((770, 660), 260, (251, 191, 36))]:
-			glow = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
-			pygame.draw.circle(glow, (*color, 30), (radius, radius), radius)
-			self.screen.blit(glow, (center[0] - radius, center[1] - radius))
+		self.draw_background()
 
 		hero = pygame.Rect(56, 60, 1168, 188)
-		hero_shadow = pygame.Surface((hero.w, hero.h), pygame.SRCALPHA)
-		pygame.draw.rect(hero_shadow, (0, 0, 0, 110), hero_shadow.get_rect(), border_radius=28)
-		self.screen.blit(hero_shadow, (hero.x + 10, hero.y + 12))
-		hero_panel = pygame.Surface((hero.w, hero.h), pygame.SRCALPHA)
-		pygame.draw.rect(hero_panel, (17, 27, 48, 235), hero_panel.get_rect(), border_radius=28)
-		pygame.draw.rect(hero_panel, (27, 42, 69, 210), (18, 18, hero.w - 36, hero.h - 36), border_radius=24)
-		self.screen.blit(hero_panel, hero.topleft)
+		self.panel(hero, radius=14)
+		pygame.draw.line(self.screen, CYAN, (hero.x + 28, hero.y + 28), (hero.x + 28, hero.bottom - 28), 3)
 		self.text("MATH FIGHT", hero.x + 42, hero.y + 48, CYAN, self.title)
 		self.text("DRAW THE LINE. BREAK THE LINE.", hero.x + 48, hero.y + 122, GOLD, self.font)
-		self.text("OFFLINE // 1 PLAYER VS CPU", hero.x + 48, hero.y + 156, MUTED, self.small)
+		self.text(f"PLAYER: {self.username}", hero.x + 48, hero.y + 156, TEXT, self.small)
+		self.text(f"{self.user_tag} // OFFLINE 1 PLAYER VS CPU", hero.x + 48, hero.y + 176, MUTED, self.small)
 
-		currency_bar = pygame.Rect(905, 80, 285, 64)
-		currency_panel = pygame.Surface((currency_bar.w, currency_bar.h), pygame.SRCALPHA)
-		pygame.draw.rect(currency_panel, (10, 18, 34, 180), currency_panel.get_rect(), border_radius=16)
-		self.screen.blit(currency_panel, currency_bar.topleft)
+		currency_bar = pygame.Rect(905, 80, 285, 94)
+		self.panel(currency_bar, fill=(10, 18, 34, 220), border=(61, 88, 116, 100), radius=10)
 		self.text(f"COINS {self.coins:04d}", currency_bar.x + 18, currency_bar.y + 20, GOLD, self.font)
 		self.text(f"DIAMONDS {self.diamonds:02d}", currency_bar.x + 18, currency_bar.y + 42, (168, 130, 255), self.small)
+		rank_name, _, next_rank, wins = self.current_rank()
+		self.text("RANK", currency_bar.x + 18, currency_bar.y + 62, CYAN, self.small)
+		self.text(rank_name, currency_bar.x + 68, currency_bar.y + 62, CYAN, self.small)
+		if next_rank:
+			self.text(f"NEXT {next_rank}", currency_bar.x + 18, currency_bar.y + 80, GOLD, self.small)
 
 		self.button(pygame.Rect(74, 300, 340, 148), "PRESET ARSENAL", "Verified equation weapons", CYAN)
 		self.button(pygame.Rect(470, 300, 340, 148), "HARD MODE", "Type it yourself. No preview.", GOLD)
 		self.button(pygame.Rect(866, 300, 340, 148), "ORB LAB", "Spend coins and diamonds", (168, 130, 255))
+		self.button(pygame.Rect(72, 494, 220, 54), "HOW TO PLAY", "Clear step-by-step guide", GOLD)
+		self.button(pygame.Rect(72, 560, 220, 54), "SEARCH USERS", "See every saved player", (168, 130, 255))
+		self.button(pygame.Rect(320, 494, 220, 54), "CHALLENGES", "Daily goals and trophies", CYAN)
+		self.button(pygame.Rect(320, 560, 220, 54), "RANK BOARD", "Local leaderboard", (168, 130, 255))
+		self.button(pygame.Rect(560, 494, 220, 54), "SETTINGS", "Audio, motion, tips", GOLD)
+		self.button(pygame.Rect(560, 560, 220, 54), "PROFILE", "Stats and unlocks", CYAN)
+		self.button(pygame.Rect(866, 560, 340, 54), "LEVEL EDITOR", "Create and save .mfl arenas", GOLD)
 
 		weapon_shop = pygame.Rect(866, 494, 340, 54)
 		mouse = pygame.mouse.get_pos()
@@ -203,15 +479,6 @@ class MathFight:
 		pygame.draw.rect(shop_panel, (168, 130, 255, 200) if weapon_hover else (168, 130, 255, 140), (10, 10, weapon_shop.w - 20, weapon_shop.h - 20), border_radius=10)
 		self.screen.blit(shop_panel, weapon_shop.topleft)
 		self.text("WEAPON SHOP", weapon_shop.x + 88, weapon_shop.y + 17, BG if weapon_hover else TEXT, self.small)
-
-		how_to_play = pygame.Rect(72, 494, 220, 54)
-		mouse = pygame.mouse.get_pos()
-		hover = how_to_play.collidepoint(mouse)
-		button_panel = pygame.Surface((how_to_play.w, how_to_play.h), pygame.SRCALPHA)
-		pygame.draw.rect(button_panel, (20, 33, 58, 220), button_panel.get_rect(), border_radius=14)
-		pygame.draw.rect(button_panel, (251, 191, 36, 200) if hover else (251, 191, 36, 140), (10, 10, how_to_play.w - 20, how_to_play.h - 20), border_radius=10)
-		self.screen.blit(button_panel, how_to_play.topleft)
-		self.text("HOW TO PLAY", how_to_play.x + 26, how_to_play.y + 17, BG if hover else TEXT, self.small)
 
 		# animated floating orb preview
 		orb_x = 1125 + math.sin(self.preview_phase * 1.2) * 14
@@ -223,6 +490,230 @@ class MathFight:
 		self.draw_mustache_orb((int(orb_x), int(orb_y)), int(orb_scale))
 
 		self.text("GRAPH ARENA / PREVIEW READY", 74, 692, GOLD, self.small)
+
+	def name_edit(self) -> None:
+		self.menu()
+		overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+		overlay.fill((8, 13, 27, 170))
+		self.screen.blit(overlay, (0, 0))
+		window = pygame.Rect(260, 180, 760, 260)
+		shadow = pygame.Surface((window.w, window.h), pygame.SRCALPHA)
+		pygame.draw.rect(shadow, (0, 0, 0, 120), shadow.get_rect(), border_radius=26)
+		self.screen.blit(shadow, (window.x + 12, window.y + 14))
+		panel = pygame.Surface((window.w, window.h), pygame.SRCALPHA)
+		pygame.draw.rect(panel, (17, 27, 48, 240), panel.get_rect(), border_radius=26)
+		pygame.draw.rect(panel, (25, 40, 68, 190), (14, 14, window.w - 28, window.h - 28), border_radius=22)
+		self.screen.blit(panel, window.topleft)
+		self.text("CHANGE NAME", window.x + 38, window.y + 28, GOLD, self.title)
+		self.text("THIS IS SAVED TO YOUR PROFILE", window.x + 38, window.y + 88, MUTED, self.small)
+		name_box = pygame.Rect(window.x + 38, window.y + 118, 420, 44)
+		pygame.draw.rect(self.screen, (26, 42, 68), name_box, border_radius=8)
+		pygame.draw.rect(self.screen, CYAN if self.name_edit_active else MUTED, name_box, 2, border_radius=8)
+		self.text(self.name_edit_text or "PLAYER", name_box.x + 14, name_box.y + 12, TEXT, self.font)
+		cancel = pygame.Rect(window.x + 38, window.y + 180, 150, 48)
+		confirm = pygame.Rect(window.x + 220, window.y + 180, 150, 48)
+		for rect, label, active in [(cancel, "CANCEL", True), (confirm, "SAVE", True)]:
+			mouse = pygame.mouse.get_pos()
+			hover = rect.collidepoint(mouse)
+			pygame.draw.rect(self.screen, CYAN if hover else PANEL_LIGHT, rect, border_radius=12)
+			self.text(label, rect.x + 42, rect.y + 16, BG if hover else TEXT, self.small)
+		self.text("PRESS ENTER TO SAVE • ESC TO GO BACK", window.x + 38, window.y + 220, MUTED, self.small)
+
+	def leaderboard(self) -> None:
+		self.menu()
+		overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+		overlay.fill((8, 13, 27, 170))
+		self.screen.blit(overlay, (0, 0))
+		window = pygame.Rect(180, 115, 920, 560)
+		panel = pygame.Surface((window.w, window.h), pygame.SRCALPHA)
+		pygame.draw.rect(panel, (17, 27, 48, 240), panel.get_rect(), border_radius=26)
+		self.screen.blit(panel, window.topleft)
+		self.text("LOCAL RANK BOARD", window.x + 38, window.y + 30, GOLD, self.title)
+		ri = [entry for entry in self.users if isinstance(entry, dict)]
+		ri = sorted(ri, key=lambda e: (int(e.get("wins", 0)), int(e.get("coins", 0)), int(e.get("diamonds", 0))), reverse=True)[:8]
+		for index, user in enumerate(ri):
+			card = pygame.Rect(window.x + 40, window.y + 110 + index * 56, 840, 46)
+			pygame.draw.rect(self.screen, (18, 30, 52), card, border_radius=10)
+			self.text(f"#{index + 1} {user.get('name', 'PLAYER')}", card.x + 18, card.y + 12, CYAN if index == 0 else TEXT, self.font)
+			self.text(f"{self.rank_label(int(user.get('wins', 0)))}", card.x + 420, card.y + 12, GOLD, self.small)
+			self.text(f"{int(user.get('coins', 0))}c", card.x + 620, card.y + 12, GOLD, self.small)
+			self.text(f"{int(user.get('diamonds', 0))}d", card.x + 720, card.y + 12, (168, 130, 255), self.small)
+		close = pygame.Rect(window.x + 720, window.y + 470, 150, 54)
+		pygame.draw.rect(self.screen, CYAN, close, border_radius=12)
+		self.text("CLOSE", close.x + 48, close.y + 18, BG, self.small)
+
+	def profile(self) -> None:
+		self.menu()
+		overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+		overlay.fill((8, 13, 27, 170))
+		self.screen.blit(overlay, (0, 0))
+		window = pygame.Rect(210, 130, 860, 520)
+		panel = pygame.Surface((window.w, window.h), pygame.SRCALPHA)
+		pygame.draw.rect(panel, (17, 27, 48, 240), panel.get_rect(), border_radius=26)
+		self.screen.blit(panel, window.topleft)
+		self.text("PLAYER PROFILE", window.x + 38, window.y + 32, GOLD, self.title)
+		self.text(f"{self.username}  [{self.user_tag}]", window.x + 38, window.y + 100, CYAN, self.font)
+		self.text(f"RANK {self.current_rank()[0]}", window.x + 38, window.y + 130, TEXT, self.small)
+		self.text(f"WINS {self.total_wins}   BEST STREAK {self.best_streak}   BATTLES {self.total_battles}", window.x + 38, window.y + 170, TEXT, self.small)
+		self.text(f"COINS {self.coins}   DIAMONDS {self.diamonds}   BEST COMBO {self.best_combo}", window.x + 38, window.y + 200, TEXT, self.small)
+		edit_name = pygame.Rect(window.x + 500, window.y + 82, 180, 42)
+		edit_hover = edit_name.collidepoint(pygame.mouse.get_pos())
+		pygame.draw.rect(self.screen, CYAN if edit_hover else PANEL_LIGHT, edit_name, border_radius=8)
+		self.text("CHANGE NAME", edit_name.x + 38, edit_name.y + 13, BG if edit_hover else TEXT, self.small)
+		if self.owner_access():
+			admin_button = pygame.Rect(window.x + 500, window.y + 140, 180, 42)
+			admin_hover = admin_button.collidepoint(pygame.mouse.get_pos())
+			pygame.draw.rect(self.screen, GOLD if admin_hover else PANEL_LIGHT, admin_button, border_radius=8)
+			self.text("ADMIN PANEL", admin_button.x + 38, admin_button.y + 13, BG if admin_hover else TEXT, self.small)
+		for i, (key, label) in enumerate([
+			("first_win", "FIRST WIN"),
+			("showdown", "SHOWDOWN"),
+			("coin_collector", "COIN COLLECTOR"),
+			("graph_guru", "GRAPH GURU"),
+			("ranked_up", "RANKED UP"),
+			("legend", "LEGEND"),
+		]):
+			rect = pygame.Rect(window.x + 38, window.y + 250 + i * 42, 320, 30)
+			pygame.draw.rect(self.screen, (18, 30, 52), rect, border_radius=8)
+			self.text(label, rect.x + 12, rect.y + 7, CYAN if self.achievements.get(key, False) else MUTED, self.small)
+		close = pygame.Rect(window.x + 690, window.y + 440, 150, 54)
+		pygame.draw.rect(self.screen, CYAN, close, border_radius=12)
+		self.text("CLOSE", close.x + 48, close.y + 18, BG, self.small)
+
+	def settings(self) -> None:
+		self.menu()
+		overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+		overlay.fill((8, 13, 27, 170))
+		self.screen.blit(overlay, (0, 0))
+		window = pygame.Rect(250, 160, 780, 420)
+		panel = pygame.Surface((window.w, window.h), pygame.SRCALPHA)
+		pygame.draw.rect(panel, (17, 27, 48, 240), panel.get_rect(), border_radius=26)
+		self.screen.blit(panel, window.topleft)
+		self.text("GAME SETTINGS", window.x + 38, window.y + 30, GOLD, self.title)
+		for index, (key, label) in enumerate([("sound", "SOUND EFFECTS"), ("reduced_motion", "REDUCED MOTION"), ("show_tips", "SHOW TIPS")]):
+			rect = pygame.Rect(window.x + 38, window.y + 110 + index * 80, 220, 40)
+			pygame.draw.rect(self.screen, (18, 30, 52), rect, border_radius=10)
+			self.text(label, rect.x + 14, rect.y + 10, TEXT, self.small)
+			box = pygame.Rect(rect.x + 250, rect.y + 5, 30, 30)
+			pygame.draw.rect(self.screen, CYAN if self.settings.get(key, True) else MUTED, box, border_radius=8)
+			self.text("ON" if self.settings.get(key, True) else "OFF", box.x + 7, box.y + 8, BG if self.settings.get(key, True) else TEXT, self.small)
+		close = pygame.Rect(window.x + 610, window.y + 330, 150, 54)
+		pygame.draw.rect(self.screen, CYAN, close, border_radius=12)
+		self.text("CLOSE", close.x + 48, close.y + 18, BG, self.small)
+
+	def challenges(self) -> None:
+		self.menu()
+		overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+		overlay.fill((8, 13, 27, 170))
+		self.screen.blit(overlay, (0, 0))
+		window = pygame.Rect(200, 120, 880, 540)
+		panel = pygame.Surface((window.w, window.h), pygame.SRCALPHA)
+		pygame.draw.rect(panel, (17, 27, 48, 240), panel.get_rect(), border_radius=26)
+		self.screen.blit(panel, window.topleft)
+		self.text("DAILY CHALLENGES", window.x + 38, window.y + 32, GOLD, self.title)
+		challenge = self.daily_challenge()
+		self.text(challenge["title"], window.x + 38, window.y + 115, CYAN, self.font)
+		self.text(challenge["description"], window.x + 38, window.y + 150, TEXT, self.small)
+		progress = min(100, int((challenge["progress"] / max(1, challenge["goal"])) * 100))
+		bar = pygame.Rect(window.x + 38, window.y + 180, 560, 18)
+		pygame.draw.rect(self.screen, PANEL_LIGHT, bar, border_radius=8)
+		pygame.draw.rect(self.screen, GOLD, (bar.x, bar.y, bar.w * progress / 100, bar.h), border_radius=8)
+		self.text(f"{challenge['progress']} / {challenge['goal']}", window.x + 620, window.y + 176, TEXT, self.small)
+		for i, (key, label) in enumerate([
+			("first_win", "FIRST WIN"),
+			("showdown", "3 WINS IN A DAY"),
+			("coin_collector", "250 COINS"),
+			("graph_guru", "5 BATTLES"),
+			("ranked_up", "RANK 3"),
+			("legend", "ALBERT EINSTEIN 5X"),
+		]):
+			rect = pygame.Rect(window.x + 38, window.y + 230 + i * 36, 520, 26)
+			pygame.draw.rect(self.screen, (18, 30, 52), rect, border_radius=8)
+			self.text(label, rect.x + 10, rect.y + 5, CYAN if self.achievements.get(key, False) else MUTED, self.small)
+		close = pygame.Rect(window.x + 700, window.y + 460, 150, 54)
+		pygame.draw.rect(self.screen, CYAN, close, border_radius=12)
+		self.text("CLOSE", close.x + 48, close.y + 18, BG, self.small)
+
+	def daily_challenge(self) -> dict:
+		challenges = [
+			{"title": "RALLY START", "id": "wins", "description": "Win 3 battles this week.", "goal": 3, "progress": min(self.total_wins, 3)},
+			{"title": "MONEY MAZE", "id": "coins", "description": "Earn 250 total coins.", "goal": 250, "progress": min(self.coins, 250)},
+			{"title": "BATTLE TEST", "id": "battles", "description": "Play 5 battles.", "goal": 5, "progress": min(self.total_battles, 5)},
+			{"title": "GRAPH HACKER", "id": "graph", "description": "Reach 2,000 total wins across all profiles.", "goal": 2000, "progress": min(self.total_wins, 2000)},
+		]
+		selection = self.daily_challenge_index % len(challenges)
+		challenge = challenges[selection]
+		challenge["progress"] = min(challenge["progress"] + self.daily_challenge_progress, challenge["goal"])
+		return challenge
+
+	def unlock_achievement(self, key: str) -> None:
+		if not self.achievements.get(key, False):
+			self.achievements[key] = True
+			self.save()
+
+	def maybe_unlock_achievements(self, result: str) -> None:
+		if result == "win":
+			self.unlock_achievement("first_win")
+			if self.total_wins >= 3:
+				self.unlock_achievement("showdown")
+			if self.coins >= 250:
+				self.unlock_achievement("coin_collector")
+			if self.total_battles >= 5:
+				self.unlock_achievement("graph_guru")
+			if self.current_rank()[0].upper().startswith("PRO") or "EINSTEIN" in self.current_rank()[0].upper():
+				self.unlock_achievement("ranked_up")
+			if "5X" in self.current_rank()[0].upper():
+				self.unlock_achievement("legend")
+
+	def toggle_setting(self, key: str) -> None:
+		self.settings[key] = not self.settings.get(key, True)
+		self.save()
+
+	def user_search(self) -> None:
+		self.menu()
+		overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+		overlay.fill((8, 13, 27, 170))
+		self.screen.blit(overlay, (0, 0))
+		window = pygame.Rect(180, 110, 920, 560)
+		shadow = pygame.Surface((window.w, window.h), pygame.SRCALPHA)
+		pygame.draw.rect(shadow, (0, 0, 0, 120), shadow.get_rect(), border_radius=26)
+		self.screen.blit(shadow, (window.x + 12, window.y + 14))
+		panel = pygame.Surface((window.w, window.h), pygame.SRCALPHA)
+		pygame.draw.rect(panel, (17, 27, 48, 240), panel.get_rect(), border_radius=26)
+		pygame.draw.rect(panel, (25, 40, 68, 190), (14, 14, window.w - 28, window.h - 28), border_radius=22)
+		self.screen.blit(panel, window.topleft)
+		self.text("SEARCH USERS", window.x + 38, window.y + 30, GOLD, self.title)
+		self.text("TYPE TO FILTER SHARED PLAYERS", window.x + 38, window.y + 90, MUTED, self.small)
+		self.text(self.online_status, window.x + 480, window.y + 90, CYAN if self.online_status.startswith("ONLINE") else RED, self.small)
+		search_box = pygame.Rect(window.x + 38, window.y + 118, 320, 42)
+		pygame.draw.rect(self.screen, (26, 42, 68), search_box, border_radius=8)
+		pygame.draw.rect(self.screen, CYAN if self.search_input_active else MUTED, search_box, 2, border_radius=8)
+		self.text(self.search_query or "PLAYER NAME...", search_box.x + 14, search_box.y + 12, TEXT, self.font)
+		close_button = pygame.Rect(window.x + 740, window.y + 440, 150, 54)
+		pygame.draw.rect(self.screen, CYAN, close_button, border_radius=12)
+		self.text("CLOSE", close_button.x + 52, close_button.y + 18, BG, self.small)
+		visible_users = []
+		profile_source = self.online_users if self.online_status.startswith("ONLINE") else self.users
+		for user in profile_source:
+			name = str(user.get("name", "PLAYER"))
+			if self.search_query and self.search_query.lower() not in name.lower():
+				continue
+			visible_users.append(user)
+		if not visible_users:
+			self.text("NO PLAYERS FOUND", window.x + 38, window.y + 180, TEXT, self.font)
+		else:
+			for index, user in enumerate(visible_users[:8]):
+				card = pygame.Rect(window.x + 38, window.y + 180 + index * 72, 840, 60)
+				pygame.draw.rect(self.screen, (18, 30, 52), card, border_radius=12)
+				pygame.draw.rect(self.screen, (255, 255, 255, 22), card, 1, border_radius=12)
+				self.text(str(user.get("name", "PLAYER")), card.x + 18, card.y + 14, CYAN, self.font)
+				user_tag = "OWNER" if str(user.get("name", "")) == self.owner_username else str(user.get("tag", "PLAYER")).upper()
+				self.text(f"{user_tag}  //  {self.rank_label(int(user.get('wins', 0)))}", card.x + 18, card.y + 36, GOLD, self.small)
+				self.text(f"COINS {int(user.get('coins', 0)):04d}", card.x + 480, card.y + 14, GOLD, self.small)
+				self.text(f"DIAMONDS {int(user.get('diamonds', 0)):02d}", card.x + 480, card.y + 34, (168, 130, 255), self.small)
+		self.text("CLICK THE BOX TO TYPE • PRESS ESC TO RETURN", window.x + 38, window.y + 510, MUTED, self.small)
+		if self.owner_access():
+			self.text("OWNER: click a user, then press 1 PLAYER  2 SUPPORTER  3 DEVELOPER  4 ADMIN", window.x + 38, window.y + 535, GOLD, self.small)
 
 	def tutorial(self) -> None:
 		self.menu()
@@ -254,9 +745,37 @@ class MathFight:
 			self.text(label, rect.x + 44, rect.y + 18, BG if hover and active else TEXT, self.small)
 		self.text("Use arrows, click buttons, or press ESC to leave this lesson.", window.x + 48, window.y + 510, MUTED, self.small)
 
-	def load_save(self) -> tuple[int, int, bool, list[str], bool, str]:
+	def load_save(self) -> tuple[int, int, bool, list[str], bool, str, int, str, list[dict], dict, dict, int, int, int, int, int, str]:
 		try:
 			data = json.loads(self.save_path.read_text(encoding="utf-8"))
+			players = data.get("users")
+			if isinstance(players, list):
+				user_list = players
+			else:
+				user_list = [{
+					"name": str(data.get("username", "PLAYER")),
+					"coins": int(data.get("coins", 0)),
+					"diamonds": int(data.get("diamonds", 3)),
+					"wins": int(data.get("wins", 0)),
+					"mustache": bool(data.get("mustache", False)),
+					"unlocked_preset_names": list(data.get("unlocked_preset_names", [])),
+					"custom_preset_unlocked": bool(data.get("custom_preset_unlocked", False)),
+					"custom_preset_equation": str(data.get("custom_preset_equation", "x^2 - 2")),
+				}]
+			username = str(data.get("username", "PLAYER"))
+			settings = data.get("settings") if isinstance(data.get("settings"), dict) else {
+				"sound": True,
+				"reduced_motion": False,
+				"show_tips": True,
+			}
+			achievements = data.get("achievements") if isinstance(data.get("achievements"), dict) else {
+				"first_win": False,
+				"showdown": False,
+				"coin_collector": False,
+				"graph_guru": False,
+				"ranked_up": False,
+				"legend": False,
+			}
 			return (
 				int(data.get("coins", 0)),
 				int(data.get("diamonds", 3)),
@@ -264,19 +783,90 @@ class MathFight:
 				list(data.get("unlocked_preset_names", [])),
 				bool(data.get("custom_preset_unlocked", False)),
 				str(data.get("custom_preset_equation", "x^2 - 2")),
+				int(data.get("wins", 0)),
+				username,
+				user_list,
+				settings,
+				achievements,
+				int(data.get("best_combo", 0)),
+				int(data.get("total_battles", 0)),
+				int(data.get("best_streak", 0)),
+				int(data.get("daily_challenge_index", 0)),
+				int(data.get("daily_challenge_progress", 0)),
+				str(data.get("daily_challenge_date", "")),
 			)
 		except (OSError, ValueError, TypeError, json.JSONDecodeError):
-			return 0, 3, False, [], False, "x^2 - 2"
+			return 0, 3, False, [], False, "x^2 - 2", 0, "PLAYER", [{
+				"name": "PLAYER",
+				"coins": 0,
+				"diamonds": 3,
+				"wins": 0,
+				"mustache": False,
+				"unlocked_preset_names": [],
+				"custom_preset_unlocked": False,
+				"custom_preset_equation": "x^2 - 2",
+			}], {
+				"sound": True,
+				"reduced_motion": False,
+				"show_tips": True,
+			}, {
+				"first_win": False,
+				"showdown": False,
+				"coin_collector": False,
+				"graph_guru": False,
+				"ranked_up": False,
+				"legend": False,
+			}, 0, 0, 0, 0, 0, ""
 
 	def save(self) -> None:
 		try:
+			current_user = {
+				"name": self.username,
+				"tag": self.user_tag,
+				"coins": self.coins,
+				"diamonds": self.diamonds,
+				"wins": self.total_wins,
+				"mustache": self.mustache,
+				"unlocked_preset_names": self.unlocked_preset_names,
+				"custom_preset_unlocked": self.custom_preset_unlocked,
+				"custom_preset_equation": self.custom_preset_equation,
+			}
+			if self.owner_access():
+				self.owner_username = self.username
+			old_name = getattr(self, "saved_username", self.username)
+			current_index = next(
+				(index for index, entry in enumerate(self.users)
+				 if isinstance(entry, dict) and entry.get("name") in {old_name, self.username}),
+				None,
+			)
+			if current_index is None:
+				self.users.insert(0, current_user)
+			else:
+				self.users[current_index] = current_user
+				self.users[:] = [
+					entry for index, entry in enumerate(self.users)
+					if index == current_index or not isinstance(entry, dict) or entry.get("name") != self.username
+				]
+			self.saved_username = self.username
 			self.save_path.write_text(json.dumps({
+				"owner_username": self.owner_username,
+				"username": self.username,
 				"coins": self.coins,
 				"diamonds": self.diamonds,
 				"mustache": self.mustache,
 				"unlocked_preset_names": self.unlocked_preset_names,
 				"custom_preset_unlocked": self.custom_preset_unlocked,
 				"custom_preset_equation": self.custom_preset_equation,
+				"wins": self.total_wins,
+				"users": self.users,
+				"settings": self.settings,
+				"achievements": self.achievements,
+				"best_combo": self.best_combo,
+				"total_battles": self.total_battles,
+				"best_streak": self.best_streak,
+				"daily_challenge_index": self.daily_challenge_index,
+				"daily_challenge_progress": self.daily_challenge_progress,
+				"daily_challenge_date": self.daily_challenge_date,
 			}), encoding="utf-8")
 		except OSError:
 			pass
@@ -362,6 +952,38 @@ class MathFight:
 		pygame.draw.ellipse(self.screen, BG, (x - 22, y + 4, x, y + 17))
 		pygame.draw.ellipse(self.screen, BG, (x, y + 4, x + 22, y + 17))
 
+	def current_rank(self) -> tuple[str, int, str | None, int]:
+		wins = max(0, self.total_wins)
+		if wins == 0:
+			current_label = "0 YEAR OLD"
+			current_threshold = 0
+			next_label = "0 YEAR OLD 1 STAR"
+			return current_label, current_threshold, next_label, wins
+
+		star_index = min((wins - 1) // 3, len(RANKS) - 1)
+		star_number = (wins - 1) % 3 + 1
+		current_label = f"{RANKS[star_index]} {star_number} STAR" if star_number == 1 else f"{RANKS[star_index]} {star_number} STARS"
+		current_threshold = wins
+
+		next_wins = wins + 1
+		if next_wins > 3 * len(RANKS):
+			next_label = None
+		else:
+			next_star_index = min((next_wins - 1) // 3, len(RANKS) - 1)
+			next_star_number = (next_wins - 1) % 3 + 1
+			next_label = f"{RANKS[next_star_index]} {next_star_number} STAR" if next_star_number == 1 else f"{RANKS[next_star_index]} {next_star_number} STARS"
+		return current_label, current_threshold, next_label, wins
+
+	def rank_label(self, wins: int) -> str:
+		wins = max(0, wins)
+		if wins == 0:
+			return "0 YEAR OLD"
+		star_index = min((wins - 1) // 3, len(RANKS) - 1)
+		star_number = (wins - 1) % 3 + 1
+		if star_number == 1:
+			return f"{RANKS[star_index]} 1 STAR"
+		return f"{RANKS[star_index]} {star_number} STARS"
+
 	def finish_battle(self, result: str) -> None:
 		if self.reward_paid:
 			return
@@ -370,6 +992,7 @@ class MathFight:
 		self.coins += 100 if result == "win" else 20
 		if result == "win":
 			self.diamonds += 1
+			self.total_wins += 1
 		self.save()
 		self.mode = "result"
 
@@ -443,6 +1066,8 @@ class MathFight:
 		pygame.draw.rect(self.screen, PANEL, (0, 0, self.screen.get_width(), 92))
 		self.text("MATH FIGHT", 24, 28, CYAN, self.font)
 		self.text(f"ROUND {self.round_number} / 3", 220, 31, GOLD, self.small)
+		rank_name, _, _, _ = self.current_rank()
+		self.text(f"RANK {rank_name}", self.screen.get_width() - 560, 31, CYAN, self.small)
 		self.text(f"YOU {self.player.hp:03d} HP     CPU {self.cpu.hp:03d} HP", self.screen.get_width() - 280, 31, TEXT, self.small)
 		self.text(f"{self.coins}c  {self.diamonds}d", self.screen.get_width() - 410, 31, GOLD, self.small)
 		menu_button = pygame.Rect(self.screen.get_width() - 140, 20, 120, 38)
@@ -453,11 +1078,14 @@ class MathFight:
 		self.text(heading, 22, 122, GOLD, self.small)
 		if self.mode == "preset":
 			presets = self.available_presets
-			for index, (name, equation, _) in enumerate(presets):
-				rect = pygame.Rect(16, 160 + index * 52, 253, 42)
-				pygame.draw.rect(self.screen, (14, 116, 144) if index == self.selected else PANEL_LIGHT, rect, border_radius=3)
-				self.text(f"{index + 1}  {name}", 27, rect.y + 6, TEXT, self.small)
-				self.text(equation, 27, rect.y + 23, CYAN, self.small)
+			for index, rect in self.preset_buttons():
+				name, equation, _ = presets[index]
+				pygame.draw.rect(self.screen, (14, 116, 144) if index == self.selected else (18, 30, 52), rect, border_radius=8)
+				pygame.draw.rect(self.screen, (255, 255, 255, 24), rect, 1, border_radius=8)
+				self.text(name, rect.x + 12, rect.y + 9, TEXT, self.small)
+				self.text(equation, rect.x + 12, rect.y + 26, CYAN, self.small)
+			preview_y = self.preset_preview_y()
+			self.text(f"PREVIEW // {presets[self.selected][1]}", 20, preview_y, CYAN, self.small)
 		else:
 			entry = pygame.Rect(18, 168, 249, 46)
 			pygame.draw.rect(self.screen, (26, 42, 68), entry, border_radius=3)
@@ -465,6 +1093,7 @@ class MathFight:
 			self.text(self.input_text, 28, 180, TEXT, self.font)
 			self.text("Allowed: y=, x, + - * / ^, sin(x), cos(x)", 20, 230, MUTED, self.small)
 			self.text("Example: y = 0.0828x^2 + 10", 20, 252, MUTED, self.small)
+			self.text(f"PREVIEW // {self.input_text}", 20, 330, CYAN, self.small)
 		fire = pygame.Rect(18, 495, 249, 52)
 		pygame.draw.rect(self.screen, GOLD, fire, border_radius=3)
 		fire_text = self.font.render("FIRE GRAPH  [ENTER]", True, BG)
@@ -648,6 +1277,62 @@ class MathFight:
 			elif pygame.Rect(72, 494, 220, 54).collidepoint(x, y):
 				self.tutorial_page = 0
 				self.mode = "tutorial"
+			elif pygame.Rect(320, 494, 220, 54).collidepoint(x, y):
+				self.mode = "challenges"
+			elif pygame.Rect(320, 560, 220, 54).collidepoint(x, y):
+				self.mode = "leaderboard"
+			elif pygame.Rect(560, 494, 220, 54).collidepoint(x, y):
+				self.mode = "settings"
+			elif pygame.Rect(560, 560, 220, 54).collidepoint(x, y):
+				self.mode = "profile"
+			elif pygame.Rect(866, 560, 340, 54).collidepoint(x, y):
+				self.mode = "level_editor"
+			elif pygame.Rect(72, 560, 220, 54).collidepoint(x, y):
+				self.search_query = ""
+				self.search_input_active = True
+				self.sync_online_profile()
+				self.refresh_online_users()
+				self.mode = "user_search"
+		elif self.mode == "level_editor":
+			canvas = pygame.Rect(330, 140, 880, 500)
+			if canvas.collidepoint(x, y):
+				normalized = ((x - canvas.left) / canvas.width, (y - canvas.top) / canvas.height)
+				nearby = next((point for point in self.level_points if abs(point[0] - normalized[0]) < 0.035 and abs(point[1] - normalized[1]) < 0.035), None)
+				if nearby is None:
+					self.level_points.append(normalized)
+					self.level_status = "Target added."
+				else:
+					self.level_points.remove(nearby)
+					self.level_status = "Target removed."
+			elif pygame.Rect(54, 194, 230, 42).collidepoint(x, y):
+				self.level_input_active = True
+			elif pygame.Rect(54, 450, 230, 46).collidepoint(x, y):
+				self.save_level()
+			elif pygame.Rect(54, 510, 230, 46).collidepoint(x, y):
+				self.load_level()
+		elif self.mode == "admin_panel":
+			if self.owner_access():
+				for index, user in enumerate(self.users[:8]):
+					row = pygame.Rect(54 + 24, 150 + 70 + index * 48, 650, 38)
+					if row.collidepoint(x, y):
+						self.admin_selected_name = str(user.get("name", ""))
+						break
+				for index, tag in enumerate(TAGS[:-1]):
+					if pygame.Rect(790, 270 + index * 54, 270, 42).collidepoint(x, y) and self.admin_selected_name:
+						self.assign_tag(self.admin_selected_name, tag)
+						break
+		elif self.mode == "name_edit":
+			name_box = pygame.Rect(298, 298, 420, 44)
+			if name_box.collidepoint(x, y):
+				self.name_edit_active = True
+			elif pygame.Rect(298, 360, 150, 48).collidepoint(x, y):
+				self.name_edit_active = False
+				self.mode = "menu"
+			elif pygame.Rect(480, 360, 150, 48).collidepoint(x, y):
+				self.username = self.name_edit_text.strip()[:16] or "PLAYER"
+				self.name_edit_active = False
+				self.save()
+				self.mode = "menu"
 		elif self.mode == "tutorial":
 			if pygame.Rect(170 + 720, 110 + 440, 150, 54).collidepoint(x, y):
 				self.mode = "menu"
@@ -657,6 +1342,34 @@ class MathFight:
 				self.tutorial_page += 1
 			elif pygame.Rect(170 + 210, 110 + 440, 150, 54).collidepoint(x, y):
 				self.mode = "menu"
+		elif self.mode == "user_search":
+			search_box = pygame.Rect(180 + 38, 110 + 118, 320, 42)
+			if search_box.collidepoint(x, y):
+				self.search_input_active = True
+			elif pygame.Rect(180 + 740, 110 + 440, 150, 54).collidepoint(x, y):
+				self.mode = "menu"
+				self.search_input_active = False
+			elif self.owner_access():
+				for index, user in enumerate(self.users[:8]):
+					row = pygame.Rect(180 + 38, 110 + 180 + index * 72, 840, 60)
+					if row.collidepoint(x, y):
+						self.tag_target_name = str(user.get("name", ""))
+						break
+		elif self.mode in {"leaderboard", "profile", "settings", "challenges"}:
+			if self.mode == "profile" and pygame.Rect(210 + 500, 130 + 82, 180, 42).collidepoint(x, y):
+				self.name_edit_text = self.username
+				self.name_edit_active = True
+				self.mode = "name_edit"
+			elif self.mode == "profile" and self.owner_access() and pygame.Rect(210 + 500, 130 + 140, 180, 42).collidepoint(x, y):
+				self.mode = "admin_panel"
+			elif pygame.Rect(180 + 720, 115 + 470, 150, 54).collidepoint(x, y):
+				self.mode = "menu"
+			if self.mode == "settings":
+				for index, (key, label) in enumerate([("sound", "SOUND EFFECTS"), ("reduced_motion", "REDUCED MOTION"), ("show_tips", "SHOW TIPS")]):
+					box = pygame.Rect(250 + 38 + 250, 160 + 110 + index * 80 + 5, 30, 30)
+					if box.collidepoint(x, y):
+						self.toggle_setting(key)
+						break
 		elif self.mode == "shop":
 			if pygame.Rect(74, 260, 430, 170).collidepoint(x, y):
 				self.buy_mustache()
@@ -678,9 +1391,12 @@ class MathFight:
 			elif pygame.Rect(486, 470, 190, 52).collidepoint(x, y):
 				self.mode = "shop"
 			return
-		if self.mode == "preset" and 16 <= x <= 269 and 160 <= y < 160 + 52 * len(self.available_presets):
-			self.selected = max(0, min(len(self.available_presets) - 1, (y - 160) // 52))
-			self.refresh_preview()
+		if self.mode == "preset":
+			for index, rect in self.preset_buttons():
+				if rect.collidepoint(x, y):
+					self.selected = index
+					self.refresh_preview()
+					break
 		elif self.mode == "hard" and pygame.Rect(18, 168, 249, 46).collidepoint(x, y):
 			self.input_active = True
 		elif pygame.Rect(18, 495, 249, 52).collidepoint(x, y):
@@ -720,6 +1436,33 @@ class MathFight:
 								self.tutorial_page += 1
 							else:
 								self.mode = "menu"
+					elif self.mode == "user_search":
+						if event.key == pygame.K_BACKSPACE:
+							self.search_query = self.search_query[:-1]
+						elif event.key == pygame.K_RETURN:
+							self.search_input_active = False
+						elif self.owner_access() and self.tag_target_name and pygame.K_1 <= event.key <= pygame.K_4:
+							self.assign_tag(self.tag_target_name, TAGS[event.key - pygame.K_1])
+						elif self.search_input_active and event.unicode and len(self.search_query) < 18:
+							self.search_query += event.unicode
+					elif self.mode == "level_editor":
+						if event.key == pygame.K_BACKSPACE and self.level_input_active:
+							self.level_name = self.level_name[:-1]
+						elif self.level_input_active and event.unicode and event.unicode.isprintable() and len(self.level_name) < 32:
+							self.level_name += event.unicode
+					elif self.mode == "name_edit":
+						if event.key == pygame.K_ESCAPE:
+							self.name_edit_active = False
+							self.mode = "menu"
+						elif event.key == pygame.K_RETURN:
+							self.username = self.name_edit_text.strip()[:16] or "PLAYER"
+							self.name_edit_active = False
+							self.save()
+							self.mode = "menu"
+						elif event.key == pygame.K_BACKSPACE:
+							self.name_edit_text = self.name_edit_text[:-1]
+						elif self.name_edit_active and event.unicode and event.unicode.isprintable() and len(self.name_edit_text) < 16:
+							self.name_edit_text += event.unicode
 					elif self.mode == "shop" and event.key == pygame.K_m:
 						self.mode = "menu"
 					elif self.mode == "result" and event.key == pygame.K_r:
@@ -762,6 +1505,22 @@ class MathFight:
 				self.result_screen()
 			elif self.mode == "tutorial":
 				self.tutorial()
+			elif self.mode == "user_search":
+				self.user_search()
+			elif self.mode == "name_edit":
+				self.name_edit()
+			elif self.mode == "level_editor":
+				self.level_editor()
+			elif self.mode == "admin_panel":
+				self.admin_panel()
+			elif self.mode == "leaderboard":
+				self.leaderboard()
+			elif self.mode == "profile":
+				self.profile()
+			elif self.mode == "settings":
+				self.settings()
+			elif self.mode == "challenges":
+				self.challenges()
 			else:
 				self.game()
 			pygame.display.flip()

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 64" role="img" aria-labelledby="title desc">
+  <title id="title">Equation interface badge</title>
+  <desc id="desc">A compact equation badge with a graph line.</desc>
+  <rect x="1" y="1" width="158" height="62" rx="10" fill="#12233b" stroke="#67e8f9" stroke-opacity=".5"/>
+  <path d="M16 45C30 45 30 20 45 20s15 25 30 25 15-25 30-25 15 25 39 25" fill="none" stroke="#67e8f9" stroke-width="3" stroke-linecap="round"/>
+  <path d="M16 51H144" stroke="#fbbf24" stroke-opacity=".75" stroke-width="2" stroke-dasharray="4 5"/>
+</svg>

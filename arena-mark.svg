@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 80" role="img" aria-labelledby="title desc">
+  <title id="title">Math Fight arena mark</title>
+  <desc id="desc">A cyan graph curve crossing a gold target on a dark grid.</desc>
+  <rect width="240" height="80" rx="12" fill="#0d1729"/>
+  <path d="M18 61H222M18 20V61" stroke="#304665" stroke-width="2"/>
+  <path d="M18 48C52 48 56 24 88 24S125 62 157 48 188 22 222 22" fill="none" stroke="#67e8f9" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="157" cy="48" r="9" fill="#fbbf24"/>
+  <circle cx="157" cy="48" r="17" fill="none" stroke="#fbbf24" stroke-opacity=".55" stroke-width="2"/>
+</svg>
