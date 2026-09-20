@@ -132,9 +132,18 @@ class MathFight:
 		self.user_tag = self.user_tag_for(self.username)
 		self.tag_target_name = ""
 		self.admin_selected_name = ""
-		self.online_server_url = os.environ.get("MATH_FIGHT_SERVER_URL", "http://127.0.0.1:8765").rstrip("/")
+		configured_server = os.environ.get("MATH_FIGHT_SERVER_URL", "").strip().rstrip("/")
+		self.online_server_url = configured_server
+		self.online_server_candidates = [
+			candidate for candidate in [
+				configured_server,
+				"http://math-fight-pi.local:8765",
+				"http://raspberrypi.local:8765",
+				"http://127.0.0.1:8765",
+			] if candidate
+		]
 		self.online_users: list[dict] = []
-		self.online_status = "Online profiles are not connected."
+		self.online_status = "AUTO-CONNECT // searching for profile server..."
 		self.level_name = "untitled_arena"
 		self.level_description = ""
 		self.level_points: list[tuple[float, float]] = []
@@ -247,7 +256,23 @@ class MathFight:
 		with urllib.request.urlopen(request, timeout=2.5) as response:
 			return json.loads(response.read().decode("utf-8"))
 
+	def discover_online_server(self) -> bool:
+		if self.online_server_url:
+			return True
+		for candidate in self.online_server_candidates:
+			try:
+				with urllib.request.urlopen(f"{candidate}/health", timeout=0.6) as response:
+					if response.status == 200:
+						self.online_server_url = candidate
+						return True
+			except (OSError, urllib.error.URLError):
+				continue
+		return False
+
 	def sync_online_profile(self) -> None:
+		if not self.discover_online_server():
+			self.online_status = "OFFLINE // profile server not found"
+			return
 		try:
 			self.online_request("POST", "/profiles", {
 				"name": self.username,
@@ -261,6 +286,10 @@ class MathFight:
 			self.online_status = "OFFLINE // start math_fight_server.py on the host PC"
 
 	def refresh_online_users(self) -> None:
+		if not self.discover_online_server():
+			self.online_users = []
+			self.online_status = "OFFLINE // profile server not found"
+			return
 		try:
 			query = urllib.parse.quote(self.search_query)
 			result = self.online_request("GET", f"/profiles?q={query}")
